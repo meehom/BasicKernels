@@ -151,3 +151,79 @@ Grid
 
 
 1.3 cutluss 实现（不推荐）
+
+
+## 2.concat
+
+concat 也是一个常见算子，同样是memory bound
+
+```
+// CUDA内核函数 - 执行向量拼接
+__global__ void vectorConcat(float *a, float *b, float *c, int n1, int n2)
+{
+    // 计算当前线程处理的元素索引
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    int total = n1 + n2;
+
+    // 确保线程不会越界访问数组
+    if (i < total)
+    {
+        if (i < n1)
+        {
+            c[i] = a[i];
+        }
+        else
+        {
+            c[i] = b[i - n1];
+        }
+    }
+}
+```
+
+cuda实现如上, benchmark 性能如下
+
+```Vector
+Average kernel time over 100 runs: 0.010424 ms
+```
+
+
+再来看看triton实现
+
+```
+@triton.jit
+def vector_concat_kernel(
+    a_ptr, b_ptr, c_ptr,
+    n1, n2,
+    BLOCK_SIZE: tl.constexpr
+):
+    # 获取当前程序的ID（类似 CUDA 中的 blockIdx）
+    pid = tl.program_id(axis=0)
+
+    # 计算当前 block 处理的元素范围
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    total = n1 + n2
+
+    # 前半段拷贝 a，后半段拷贝 b
+    mask_a = offsets < n1
+    mask_b = (offsets >= n1) & (offsets < total)
+
+    a_vals = tl.load(a_ptr + offsets, mask=mask_a)
+    b_vals = tl.load(b_ptr + (offsets - n1), mask=mask_b)
+
+    tl.store(c_ptr + offsets, a_vals, mask=mask_a)
+    tl.store(c_ptr + offsets, b_vals, mask=mask_b)
+```
+
+实现基本和cuda一致，cuda就是分块实现了而已
+
+接着我们看看性能
+
+```
+测试通过! N1=400000, N2=600000
+前5个结果: [2.032806396484375, -0.6365836262702942, -1.399915337562561, -0.4224852919578552, 1.3264602422714233]
+Triton kernel 平均耗时: 0.037458 ms
+torch.cat 平均耗时: 0.011428 ms
+```
+
+接近30us，也算是不错了。
